@@ -1,0 +1,166 @@
+import numpy as np
+import itertools
+import scipy
+from scipy import signal
+import matplotlib.pyplot as plt
+
+class Fibre:
+    def __init__(self, tau_0 = 0.5, lambdaa=0.1, L= 10, D = 15, wavelength = 1.55, NEP =2, dB_km = 0.3):
+        self.tau_0 = tau_0
+        self.lambdaa = lambdaa
+        self.L = L
+        self.D = D
+        #self.tau = np.sqrt((tau_0 **2)+((D*lambdaa*(10**-3)*L)**2))
+        self.tau = np.sqrt((tau_0 **2)+(((D*lambdaa*L)*10**-3)**2))
+        self.wavelength = wavelength
+        self.NEP = NEP
+        self.dB_km = 0.3
+        
+    def Power(self,t, pulse_spacing = 0, P_0 =1):
+
+        #conserving area
+        P_0prime = P_0*(self.tau_0/self.tau)
+        return P_0prime * (np.exp(-(t-pulse_spacing)**2/(2*self.tau**2)))
+    
+    def Power_generator(self, t, num_of_pulses, pulse_spacing = 0 , P_0=1, random = 0):
+        
+        #default 111.. generation.
+        seq = np.ones(num_of_pulses, dtype = int)
+        if random == 1:
+            #random generation of pulses
+            seq = np.random.randint(2,size =num_of_pulses)
+        i = 0
+        while i<num_of_pulses:
+            if i == 0:
+                sum = seq[0]*self.Power(t, pulse_spacing =0, P_0=1)
+                
+                i+= 1
+                continue
+            sum += seq[i]*self.Power(t, i*pulse_spacing, P_0)        
+            i +=1
+        #default is zero loss. 
+        power_out = P_0*10**(-self.dB_km/10)
+        p = power_out*sum 
+        return p, seq
+        
+    def plot_detected_power(self, t, num_of_pulses, pulse_spacing =0, P_0 = 1, 
+                        fibre_loss=0 , fibre_length=0, fibre_dispersion=0, coupling_loss=0, splice_loss=0, flag=0):
+        
+        fig = plt.figure()
+        
+        tau_sq = self.tau**2
+        P0_prime = P_0*tau_sq**0.5
+        
+        total = 0
+        total_no_dis=0
+        
+        
+        
+        p, seq = self.Power_generator(t, num_of_pulses, pulse_spacing , P_0, flag)
+
+        plt.plot(t, p)
+        plt.title('{} pulse sequence'.format(seq))
+        plt.xlabel('time(ns)')
+        plt.ylabel('power(mW)')
+        plt.show()
+        return fig
+    
+    def eye_diagram(self,t, pulse_spacing =1, p=-1, filter = 0, bit_rate = 1, n=5):
+        """t value must be same size as p"""
+        permut = Fibre.permutation(n)
+        if type(p) != np.ndarray:
+            p = np.ones(t.size)*(self.tau_0/self.tau)
+
+        if filter ==1:
+            fig, ax =plt.subplots(3,1)
+            for i in [0,1,2]:
+                ax[i].set_ylabel('power (mW)')
+                ax[i].set_xlabel('time (ns)')
+            ax[0].set_title('Output signal with {}Gb/s at length{}km'.format(bit_rate, self.L))
+            ax[1].set_title('Recived noisy signal with {}Gb/s at length{}km'.format(bit_rate, self.L))
+            ax[2].set_title('Filtered signal with {}Gb/s at length{}km'.format(bit_rate, self.L))
+        for i in permut:
+            signal  = Fibre.bit_seq(t, p, i, pulse_spacing, self.tau)
+            if filter ==1:
+                arr=self.noise(signal,bit_rate , pulse_spacing )
+                #output signal 
+                ax[0].plot(t, signal)
+                #receciver signal noisy
+                ax[1].plot(t, arr[0])
+                #filetered signal 
+                ax[2].plot(t, arr[1])
+            #output signal    
+            plt.plot(t, signal)
+            
+            
+    
+    def noise(self, sig, bit_rate, pulse_spacing):
+        """ Refered to madison's "filter" function here. """
+        n=1000
+        tbin =10
+        #tbin  = (5/bit_rate)*10
+        tstep = (5/bit_rate)*10 / n
+        t = np.linspace(-pulse_spacing, pulse_spacing*3, n)
+        fs = 1/tstep
+        fc = bit_rate/2
+        
+        #filter coeffients. 
+        sos = scipy.signal.butter(2, fc, fs=fs, output ='sos')
+        #filter data
+        signalfit = scipy.signal.sosfilt(sos, sig)
+        signal_power = 1*10**(6)
+        wavelength = self.wavelength*(10**(-6))
+        Uphoton = scipy.constants.h * scipy.constants.c / wavelength * 1.0e12
+        sig_photon_e = signal_power * tstep * 1e-9 / Uphoton * sig
+        rng = np.random.default_rng()       # Get the default random number generator
+        sig_photon = rng.poisson(sig_photon_e)   # Generate a photon signal with poisson statistics
+        
+        sig_photon_fit = scipy.signal.sosfilt(sos, sig_photon)
+        Pnoise = self.NEP *np.sqrt(fs/2*(10**9))
+        Nnoise_rms = Pnoise *tstep * (10**-9)/Uphoton
+        Nnoise = rng.normal(loc=0, scale=Nnoise_rms, size= n)
+        input_signal = Nnoise +sig_photon
+        sig_filt = scipy.signal.sosfilt(sos, Nnoise+sig_photon)
+        
+        return input_signal, sig_filt
+            
+    
+    @staticmethod
+    def bit_seq(t, p, bit_arr, pulse_spacing, tau ):
+        #single pulse aka just pulse spacing needed
+        j=0
+        sum = 0
+        for i in bit_arr:
+            i = int(i)
+            if i == 0:
+                j+= 1
+                continue
+            else:
+                sum += np.exp(- (t - pulse_spacing*(j)) **2 / (2*tau **2))
+                j+=1
+        return sum*p
+    
+    @staticmethod
+    def permutation(k):
+        """ reference this from the stackoverflow article
+        https://stackoverflow.com/questions/4928297/all-permutations-of-a-binary-sequence-x-bits-long"""
+        return [''.join(x) for x in itertools.product('01', repeat=k)]
+        
+
+#Example model.
+
+#fibre1 = Fibre(lambdaa = 0.2, D = 20, wavelength = 1.55, NEP = 2, L =10, dB_km = 0.3)
+#t = np.linspace(-2,7,1000)
+
+#randmoly generated pulse sequence of spacing 1(ns), over some time range of t(ns)
+#seq1 = fibre1.Power_generator(t, num_of_pulses = 4, random =1, pulse_spacing =1)
+
+#Where filter function is set to 1 the entire pulse sequence lifespan is shown 
+#from Clean ideal non noisy output signal ---> noisy signal recived by detector ----> interpertation of signal when sampling.
+#Where fitler function is not mentioned or set to 0 only non noisy ideal output signal graph is shown.
+#fibre1.eye_diagram(t, pulse_spacing=1.1, filter =1 , n =4, p = seq1, bit_rate = 1)
+
+#Making graphs readable. 
+#plt.subplots_adjust(hspace= 0.45)
+#plt.rcParams["figure.figsize"] = (10,16)
+
